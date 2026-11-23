@@ -642,6 +642,101 @@ void readCaptureCommands(CaptureControl& control, const std::function<void(bool)
     control.requestStop();
 }
 
+// Validates the captured texture against the session's initial raw dimensions,
+// lazily allocates `latestFrameTexture` at the cropped (unscaled) capture size
+// expected by MFEncoder::scaleFrame, and copies either the cropped/even-aligned
+// sub-region or the full frame into it.
+bool copyCapturedFrame(
+    const CaptureSession& session,
+    ID3D11Texture2D* sourceTexture,
+    UINT expectedRawWidth,
+    UINT expectedRawHeight,
+    int captureWidth,
+    int captureHeight,
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>& latestFrameTexture) {
+    if (!sourceTexture || captureWidth < 2 || captureHeight < 2) {
+        return false;
+    }
+
+    // A display mode change mid-take (resolution, scale) hands over frames of a
+    // new size. The encoder was set up for the first one, and CopyResource
+    // between mismatched textures is undefined, so end the take with a clear
+    // error instead of recording garbage. Checked against the hoisted startup
+    // raw dimensions so mutable backend getters (e.g. DXGI reacquire) cannot
+    // mask a mid-take resolution change.
+    D3D11_TEXTURE2D_DESC frameDesc{};
+    sourceTexture->GetDesc(&frameDesc);
+    if (frameDesc.Width < 2 || frameDesc.Height < 2) {
+        std::cerr << "ERROR: Capture size is smaller than minimum 2x2 (" << frameDesc.Width
+                  << "x" << frameDesc.Height << "); ending the take" << std::endl;
+        return false;
+    }
+    if (frameDesc.Width != expectedRawWidth || frameDesc.Height != expectedRawHeight) {
+        std::cerr << "ERROR: Capture size changed mid-recording (" << expectedRawWidth
+                  << "x" << expectedRawHeight << " -> " << frameDesc.Width << "x"
+                  << frameDesc.Height << "); ending the take" << std::endl;
+        return false;
+    }
+
+    if (!latestFrameTexture) {
+        D3D11_TEXTURE2D_DESC desc = frameDesc;
+        desc.Width = static_cast<UINT>(captureWidth);
+        desc.Height = static_cast<UINT>(captureHeight);
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        if (FAILED(session.device()->CreateTexture2D(&desc, nullptr, &latestFrameTexture))) {
+            std::cerr << "ERROR: Failed to create latest frame texture (" << captureWidth
+                      << "x" << captureHeight << ")" << std::endl;
+            return false;
+        }
+    }
+
+    // The wedge risk this class exists to avoid: the D3D11 copy below can
+    // block inside the display driver and never return (#252, still true of
+    // PR #305's DXGI path on some hardware). On the default pull path it does
+    // so only on the writer thread, which already owns deciding when to give
+    // up -- there is no separate WGC callback thread left for it to take a
+    // lock down with it.
+    const bool needsRegionCopy =
+        session.hasCrop() ||
+        static_cast<UINT>(captureWidth) != frameDesc.Width ||
+        static_cast<UINT>(captureHeight) != frameDesc.Height;
+    if (needsRegionCopy) {
+        const int cropLeft = session.hasCrop() ? session.cropLeft() : 0;
+        const int cropTop = session.hasCrop() ? session.cropTop() : 0;
+        if (cropLeft < 0 || cropTop < 0) {
+            std::cerr << "ERROR: Invalid crop origin (" << cropLeft << "," << cropTop
+                      << "); ending the take" << std::endl;
+            return false;
+        }
+        const uint64_t boxRight =
+            static_cast<uint64_t>(cropLeft) + static_cast<uint64_t>(captureWidth);
+        const uint64_t boxBottom =
+            static_cast<uint64_t>(cropTop) + static_cast<uint64_t>(captureHeight);
+        if (boxRight > frameDesc.Width || boxBottom > frameDesc.Height) {
+            std::cerr << "ERROR: Capture crop box (" << cropLeft << "," << cropTop << " "
+                      << captureWidth << "x" << captureHeight << ") exceeds frame ("
+                      << frameDesc.Width << "x" << frameDesc.Height << "); ending the take"
+                      << std::endl;
+            return false;
+        }
+        D3D11_BOX srcBox{};
+        srcBox.left = static_cast<UINT>(cropLeft);
+        srcBox.top = static_cast<UINT>(cropTop);
+        srcBox.front = 0;
+        srcBox.right = srcBox.left + static_cast<UINT>(captureWidth);
+        srcBox.bottom = srcBox.top + static_cast<UINT>(captureHeight);
+        srcBox.back = 1;
+        session.context()->CopySubresourceRegion(
+            latestFrameTexture.Get(), 0, 0, 0, 0,
+            sourceTexture, 0, &srcBox);
+    } else {
+        session.context()->CopyResource(latestFrameTexture.Get(), sourceTexture);
+    }
+    return true;
+}
+
 } // namespace
 
 // `wmain`, not `main`: the config JSON arrives on the command line, and a narrow
@@ -1066,24 +1161,18 @@ int wmain(int argc, wchar_t* argv[]) {
     std::timed_mutex frameMutex;
     std::condition_variable_any frameCv;
 
+    // Captured once before either frame loop starts so mutable backend getters
+    // (such as DXGI reacquire after a mode change) cannot hide a mid-take
+    // capture size change.
+    const UINT expectedRawWidth = static_cast<UINT>(std::max(0, session.rawWidth()));
+    const UINT expectedRawHeight = static_cast<UINT>(std::max(0, session.rawHeight()));
+
     if (legacyFrameCallback) {
         session.setFrameCallback([&](ID3D11Texture2D* texture, int64_t /*timestampHns*/) {
             if (control.stopRequested || control.paused) {
                 return;
             }
             std::scoped_lock lock(frameMutex);
-            if (!latestFrameTexture) {
-                D3D11_TEXTURE2D_DESC desc{};
-                texture->GetDesc(&desc);
-                desc.BindFlags = 0;
-                desc.CPUAccessFlags = 0;
-                desc.MiscFlags = 0;
-                if (FAILED(session.device()->CreateTexture2D(&desc, nullptr, &latestFrameTexture))) {
-                    encodeFailed = true;
-                    control.requestStop();
-                    return;
-                }
-            }
 
             // Gated on an already-arrived first frame: main() blocks up to 10s
             // waiting for firstFrameWritten before it will even print
@@ -1097,7 +1186,19 @@ int wmain(int argc, wchar_t* argv[]) {
             if (testStallFrameCallbackMs > 0 && firstFrameWritten.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(testStallFrameCallbackMs));
             }
-            session.context()->CopyResource(latestFrameTexture.Get(), texture);
+            if (!copyCapturedFrame(
+                    session,
+                    texture,
+                    expectedRawWidth,
+                    expectedRawHeight,
+                    captureWidth,
+                    captureHeight,
+                    latestFrameTexture)) {
+                encodeFailed = true;
+                control.requestStop();
+                frameCv.notify_all();
+                return;
+            }
             if (!firstFrameWritten.exchange(true)) {
                 frameCv.notify_all();
             }
@@ -1188,44 +1289,20 @@ int wmain(int argc, wchar_t* argv[]) {
                     const bool gotFrame = session.tryGetNextFrame(&wgcTexture, &wgcTimestampHns);
                     pictureChanged = gotFrame;
                     if (gotFrame) {
-                        if (!latestFrameTexture) {
-                            D3D11_TEXTURE2D_DESC desc{};
-                            wgcTexture->GetDesc(&desc);
-                            desc.BindFlags = 0;
-                            desc.CPUAccessFlags = 0;
-                            desc.MiscFlags = 0;
-                            if (FAILED(session.device()->CreateTexture2D(&desc, nullptr, &latestFrameTexture))) {
-                                encodeFailed = true;
-                                control.requestStop();
-                                break;
-                            }
-                        }
-                        // A display mode change mid-take (resolution, scale)
-                        // hands over frames of a new size. The encoder was set
-                        // up for the first one, and CopyResource between
-                        // mismatched textures is undefined, so end the take
-                        // with a clear error instead of recording garbage.
-                        D3D11_TEXTURE2D_DESC frameDesc{};
-                        D3D11_TEXTURE2D_DESC latestDesc{};
-                        wgcTexture->GetDesc(&frameDesc);
-                        latestFrameTexture->GetDesc(&latestDesc);
-                        if (frameDesc.Width != latestDesc.Width || frameDesc.Height != latestDesc.Height) {
-                            std::cerr << "ERROR: Capture size changed mid-recording (" << latestDesc.Width
-                                      << "x" << latestDesc.Height << " -> " << frameDesc.Width << "x"
-                                      << frameDesc.Height << "); ending the take" << std::endl;
+                        const bool copied = copyCapturedFrame(
+                            session,
+                            wgcTexture,
+                            expectedRawWidth,
+                            expectedRawHeight,
+                            captureWidth,
+                            captureHeight,
+                            latestFrameTexture);
+                        session.releaseFrame();
+                        if (!copied) {
                             encodeFailed = true;
                             control.requestStop();
                             break;
                         }
-                        // The wedge risk this class exists to avoid: this call
-                        // can block inside the display driver and never return
-                        // (#252, still true of PR #305's DXGI path on some
-                        // hardware). It now does so only on this thread, which
-                        // already owns deciding when to give up -- there is no
-                        // separate WGC callback thread left for it to take a
-                        // lock down with it.
-                        session.context()->CopyResource(latestFrameTexture.Get(), wgcTexture);
-                        session.releaseFrame();
                         uniqueFrames += 1;
                         firstFrameWritten = true;
                     } else if (!latestFrameTexture) {

@@ -17,6 +17,7 @@ import {
 	readStoppedPath,
 	readWebcamFormat,
 	readWebcamUnavailable,
+	readWindowCrop,
 	rememberSoftwareEncoderAdapter,
 	terminateNativeWindowsCapture,
 	waitForNativeWindowsCaptureStop,
@@ -291,6 +292,74 @@ describe("readWebcamFormat", () => {
 
 	it("is null when the helper never announced a camera", () => {
 		expect(readWebcamFormat("Recording started\n")).toBe(null);
+	});
+});
+
+describe("readWindowCrop", () => {
+	it("reads a valid window-crop event", () => {
+		const output =
+			'{"event":"ready","schemaVersion":2}\n' +
+			'{"event":"window-crop","schemaVersion":2,"rawWidth":1936,"rawHeight":1096,"cropLeft":0,"cropTop":0,"width":1920,"height":1080}\n' +
+			"Recording started\n";
+		expect(readWindowCrop(output)).toEqual({
+			schemaVersion: 2,
+			rawWidth: 1936,
+			rawHeight: 1096,
+			cropLeft: 0,
+			cropTop: 0,
+			width: 1920,
+			height: 1080,
+		});
+	});
+
+	it("reads the event when stderr diagnostics or another event are glued onto the same line", () => {
+		const output =
+			'INFO: adapter=0{"event":"window-crop","schemaVersion":2,"rawWidth":1016,"rawHeight":736,"cropLeft":0,"cropTop":0,"width":1000,"height":728}' +
+			'{"event":"cursor-capture","schemaVersion":2,"requested":false,"applied":false}\n';
+		expect(readWindowCrop(output)).toEqual({
+			schemaVersion: 2,
+			rawWidth: 1016,
+			rawHeight: 736,
+			cropLeft: 0,
+			cropTop: 0,
+			width: 1000,
+			height: 728,
+		});
+	});
+
+	it("takes the latest window-crop event when repeated", () => {
+		const output =
+			'{"event":"window-crop","schemaVersion":2,"rawWidth":1296,"rawHeight":736,"cropLeft":0,"cropTop":0,"width":1280,"height":720}\n' +
+			'{"event":"window-crop","schemaVersion":2,"rawWidth":1936,"rawHeight":1096,"cropLeft":0,"cropTop":0,"width":1920,"height":1080}\n';
+		expect(readWindowCrop(output)).toEqual({
+			schemaVersion: 2,
+			rawWidth: 1936,
+			rawHeight: 1096,
+			cropLeft: 0,
+			cropTop: 0,
+			width: 1920,
+			height: 1080,
+		});
+	});
+
+	it("returns null when truncated, invalid, missing required fields, or absent", () => {
+		expect(readWindowCrop("Recording started\n")).toBe(null);
+		expect(readWindowCrop('{"event":"window-crop","schemaVersion":2,"rawWidth":1936')).toBe(null);
+		expect(
+			readWindowCrop(
+				'{"event":"window-crop","rawWidth":1936,"rawHeight":1096,"cropLeft":0,"cropTop":0,"width":1920,"height":1080}\n',
+			),
+		).toBe(null);
+		expect(
+			readWindowCrop(
+				'{"event":"window-crop","schemaVersion":2,"rawWidth":1936,"rawHeight":1096,"cropLeft":0,"cropTop":0,"width":"1920","height":1080}\n',
+			),
+		).toBe(null);
+		expect(
+			readWindowCrop(
+				'{"event":"window-crop","schemaVersion":2,"rawWidth":1936,"rawHeight":1096,"cropLeft":0,"cropTop":0,"width":0,"height":1080}\n',
+			),
+		).toBe(null);
 	});
 });
 

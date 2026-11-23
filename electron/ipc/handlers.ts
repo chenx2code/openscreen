@@ -162,6 +162,7 @@ import {
 	readStalledEncoderAdapter,
 	readWebcamFormat,
 	readWebcamUnavailable,
+	readWindowCrop,
 	rememberSoftwareEncoderAdapter,
 	terminateNativeWindowsCapture,
 	waitForNativeWindowsCaptureStop,
@@ -3309,6 +3310,7 @@ export function registerIpcHandlers(
 					cursorOffsetMs: nativeWindowsCursorOffsetMs,
 					webcamFormat,
 					encoderSelection,
+					windowCrop: readWindowCrop(nativeWindowsCaptureOutput),
 					// Logged only: menus missing from a window take on Windows before 11
 					// 24H2 are a platform limit, not something to put in front of the user.
 					secondaryWindowsApplied: readSecondaryWindowsApplied(nativeWindowsCaptureOutput),

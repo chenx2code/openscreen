@@ -122,6 +122,26 @@ public:
         return backend_ == Backend::Dxgi ? dxgi_.captureHeight() : wgc_.captureHeight();
     }
 
+    int rawWidth() const {
+        return backend_ == Backend::Dxgi ? dxgi_.captureWidth() : wgc_.rawWidth();
+    }
+
+    int rawHeight() const {
+        return backend_ == Backend::Dxgi ? dxgi_.captureHeight() : wgc_.rawHeight();
+    }
+
+    bool hasCrop() const {
+        return backend_ == Backend::Wgc && wgc_.hasCrop();
+    }
+
+    int cropLeft() const {
+        return backend_ == Backend::Wgc ? wgc_.cropLeft() : 0;
+    }
+
+    int cropTop() const {
+        return backend_ == Backend::Wgc ? wgc_.cropTop() : 0;
+    }
+
     ID3D11Device* device() const {
         return backend_ == Backend::Dxgi ? dxgi_.device() : wgc_.device();
     }

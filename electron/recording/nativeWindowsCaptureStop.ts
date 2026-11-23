@@ -253,18 +253,17 @@ function findObjectEnd(output: string, start: number) {
 }
 
 /**
- * The format the helper negotiated with the camera, or null if it never said.
+ * Reads the last JSON object emitted for `eventName` from combined helper output.
  *
  * Slices the object out of the buffer rather than parsing a line whole. Both
  * helper streams are drained into this one string, diagnostics go to stderr and
  * protocol to stdout, and a chunk boundary routinely glues them together — real
  * output contains lines like
  * `INFO: DirectShow webcam connected subtype NV12 {"event":"webcam-format",…}`.
- * `JSON.parse` on that throws, and a working camera reads as one that said
- * nothing at all.
+ * `JSON.parse` on that throws, and a working helper event reads as absent.
  */
-export function readWebcamFormat(output: string) {
-	const start = output.lastIndexOf('{"event":"webcam-format"');
+function readHelperJsonEvent(output: string, eventName: string): Record<string, unknown> | null {
+	const start = output.lastIndexOf(`{"event":"${eventName}"`);
 	if (start === -1) {
 		return null;
 	}
@@ -274,15 +273,78 @@ export function readWebcamFormat(output: string) {
 	}
 
 	try {
-		return JSON.parse(output.slice(start, end + 1)) as {
-			width?: number;
-			height?: number;
-			fps?: number;
-			deviceName?: string;
-		};
+		const parsed: unknown = JSON.parse(output.slice(start, end + 1));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return null;
+		}
+		const record = parsed as Record<string, unknown>;
+		return record.event === eventName ? record : null;
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The format the helper negotiated with the camera, or null if it never said.
+ */
+export function readWebcamFormat(output: string) {
+	const parsed = readHelperJsonEvent(output, "webcam-format");
+	if (!parsed) {
+		return null;
+	}
+	return parsed as {
+		width?: number;
+		height?: number;
+		fps?: number;
+		deviceName?: string;
+	};
+}
+
+export type NativeWindowsWindowCrop = {
+	schemaVersion: number;
+	rawWidth: number;
+	rawHeight: number;
+	cropLeft: number;
+	cropTop: number;
+	width: number;
+	height: number;
+};
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * The cropped window region the helper settled on, or null when no valid
+ * `window-crop` event was emitted (display capture, uncropped window, or older
+ * helper).
+ */
+export function readWindowCrop(output: string): NativeWindowsWindowCrop | null {
+	const parsed = readHelperJsonEvent(output, "window-crop");
+	if (!parsed) {
+		return null;
+	}
+	const { schemaVersion, rawWidth, rawHeight, cropLeft, cropTop, width, height } = parsed;
+	if (
+		!isFiniteNumber(schemaVersion) ||
+		!Number.isInteger(schemaVersion) ||
+		schemaVersion <= 0 ||
+		!isFiniteNumber(rawWidth) ||
+		!isFiniteNumber(rawHeight) ||
+		!isFiniteNumber(cropLeft) ||
+		!isFiniteNumber(cropTop) ||
+		!isFiniteNumber(width) ||
+		!isFiniteNumber(height) ||
+		rawWidth <= 0 ||
+		rawHeight <= 0 ||
+		cropLeft < 0 ||
+		cropTop < 0 ||
+		width <= 0 ||
+		height <= 0
+	) {
+		return null;
+	}
+	return { schemaVersion, rawWidth, rawHeight, cropLeft, cropTop, width, height };
 }
 
 /**

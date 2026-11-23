@@ -190,3 +190,11 @@ if (!fs.existsSync(encoderColorTestPath)) {
 // ffprobe/ffmpeg are not on PATH.
 await run(encoderColorTestPath, [], { cwd: BUILD_DIR });
 console.log(`Passed ${encoderColorTestPath}`);
+
+const windowCropBoundsTestPath = path.join(BUILD_DIR, "window_crop_bounds_test.exe");
+if (!fs.existsSync(windowCropBoundsTestPath)) {
+	throw new Error(`WGC helper build completed but ${windowCropBoundsTestPath} was not found.`);
+}
+// Guards window crop dimensions, parity alignment, and cursor-sampler origin agreement.
+await run(windowCropBoundsTestPath, [], { cwd: BUILD_DIR });
+console.log(`Passed ${windowCropBoundsTestPath}`);

@@ -69,6 +69,7 @@ add_executable(wgc-capture
   src/webcam_preview_bitmap.h
   src/wgc_session.cpp
   src/wgc_session.h
+  src/window_crop_bounds.h
 )
 
 target_compile_definitions(wgc-capture PRIVATE
@@ -82,6 +83,7 @@ target_compile_options(wgc-capture PRIVATE /EHsc /W4 /utf-8)
 target_link_libraries(wgc-capture PRIVATE
   avrt
   d3d11
+  dwmapi
   dxgi
   gdi32
   mf
@@ -97,6 +99,7 @@ add_executable(cursor-sampler
   src/cursor-sampler.cpp
   src/dpi_awareness.h
   src/realtime_scheduling.h
+  src/window_crop_bounds.h
 )
 
 target_compile_definitions(cursor-sampler PRIVATE
@@ -108,6 +111,7 @@ target_compile_options(cursor-sampler PRIVATE /EHsc /W4 /utf-8)
 
 target_link_libraries(cursor-sampler PRIVATE
   avrt
+  dwmapi
   gdi32
   gdiplus
   winmm
@@ -225,3 +229,17 @@ add_executable(webcam_preview_bitmap_test
   src/webcam_preview_bitmap_test.cpp
 )
 target_compile_options(webcam_preview_bitmap_test PRIVATE /EHsc /W4 /utf-8)
+
+add_executable(window_crop_bounds_test
+  src/window_crop_bounds.h
+  src/window_crop_bounds_test.cpp
+)
+
+target_compile_definitions(window_crop_bounds_test PRIVATE
+  NOMINMAX
+  WIN32_LEAN_AND_MEAN
+  _WIN32_WINNT=0x0A00
+)
+
+target_compile_options(window_crop_bounds_test PRIVATE /EHsc /W4 /utf-8)
+target_link_libraries(window_crop_bounds_test PRIVATE dwmapi)

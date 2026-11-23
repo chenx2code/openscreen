@@ -87,6 +87,11 @@ public:
 
     int captureWidth() const;
     int captureHeight() const;
+    int rawWidth() const { return rawWidth_; }
+    int rawHeight() const { return rawHeight_; }
+    bool hasCrop() const { return hasCrop_; }
+    int cropLeft() const { return cropLeft_; }
+    int cropTop() const { return cropTop_; }
     ID3D11Device* device() const;
     ID3D11DeviceContext* context() const;
 
@@ -121,6 +126,11 @@ private:
     bool quiesced_ = false;
     int width_ = 0;
     int height_ = 0;
+    int rawWidth_ = 0;
+    int rawHeight_ = 0;
+    bool hasCrop_ = false;
+    int cropLeft_ = 0;
+    int cropTop_ = 0;
     int fps_ = 60;
     bool captureCursor_ = false;
     bool includeSecondaryWindows_ = false;

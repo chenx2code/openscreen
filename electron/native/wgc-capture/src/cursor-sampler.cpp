@@ -1,9 +1,11 @@
 #include <windows.h>
+#include <dwmapi.h>
 #include <gdiplus.h>
 #include <objbase.h>
 
 #include "dpi_awareness.h"
 #include "realtime_scheduling.h"
+#include "window_crop_bounds.h"
 
 #include <atomic>
 #include <algorithm>
@@ -11,6 +13,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -317,6 +320,7 @@ static std::string buildAssetJson(
 // ─────────────────────────────────────────────────────────────────────────────
 static void runSamplingLoop(int intervalMs, HWND targetWindow, const CLSID& pngClsid) {
     HCURSOR lastCursor = nullptr;
+    const WindowDpiProcs dpiProcs = WindowDpiProcs::load();
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         const int downCount = g_leftDownCount.exchange(0, std::memory_order_relaxed);
@@ -366,17 +370,14 @@ static void runSamplingLoop(int intervalMs, HWND targetWindow, const CLSID& pngC
         // Window bounds
         std::string boundsJson = "null";
         if (targetWindow && IsWindow(targetWindow)) {
-            RECT r{};
-            if (GetWindowRect(targetWindow, &r)) {
-                const int bw = r.right  - r.left;
-                const int bh = r.bottom - r.top;
-                if (bw > 0 && bh > 0) {
-                    char buf[128];
-                    std::snprintf(buf, sizeof(buf),
-                        "{\"x\":%ld,\"y\":%ld,\"width\":%d,\"height\":%d}",
-                        r.left, r.top, bw, bh);
-                    boundsJson = buf;
-                }
+            const HWND boundsWindow = resolveRootCaptureWindow(targetWindow);
+            const WindowCropResult bounds = queryWindowCropBounds(boundsWindow, dpiProcs, 0, 0);
+            if (bounds.hasSamplerBounds) {
+                char buf[128];
+                std::snprintf(buf, sizeof(buf),
+                    "{\"x\":%ld,\"y\":%ld,\"width\":%d,\"height\":%d}",
+                    bounds.originX, bounds.originY, bounds.samplerWidth, bounds.samplerHeight);
+                boundsJson = buf;
             }
         }
 

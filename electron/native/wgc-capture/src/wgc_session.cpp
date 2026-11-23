@@ -1,11 +1,14 @@
 #include "wgc_session.h"
+#include "window_crop_bounds.h"
 
 #include <Windows.Graphics.Capture.Interop.h>
 #include <d3d10.h>
+#include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <inspectable.h>
 #include <winrt/base.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -33,28 +36,6 @@ bool succeeded(HRESULT hr, const char* label) {
 
 int64_t timeSpanToHns(wf::TimeSpan const& value) {
     return value.count();
-}
-
-// H.264 encoding (and the RGB32->NV12 conversion feeding it) requires even
-// frame dimensions. Monitor resolutions are always even in practice, so
-// CreateForMonitor items never hit this. Windows, however, frequently have
-// odd client-area dimensions (arbitrary drag-resize, DPI rounding), and
-// GraphicsCaptureItem::Size() reports the window's *actual* size verbatim.
-// If we requested a Direct3D11CaptureFramePool sized to that odd value while
-// the rest of the pipeline (main.cpp's bitrate calc, MFEncoder) rounds down
-// to even, the frame pool's real DXGI textures end up one pixel wider/taller
-// than the staging texture the encoder allocates. ID3D11DeviceContext::
-// CopyResource silently no-ops on a size mismatch (it only emits a debug-
-// layer warning), so the staging texture never receives pixel data and the
-// output is solid black for the entire recording -- or, if the mismatch
-// trips up the video MFT's input negotiation, SetInputMediaType fails
-// outright. Rounding up to the nearest even size here, and using that
-// rounded size (not the raw item size) for both the frame pool and
-// `captureWidth()`/`captureHeight()`, keeps every consumer of this session
-// looking at the exact same dimensions as the real captured texture.
-int roundUpToEven(int value) {
-    const int clamped = std::max(2, value);
-    return (clamped % 2 == 0) ? clamped : clamped + 1;
 }
 
 } // namespace
@@ -148,6 +129,11 @@ bool WgcSession::createCaptureItem(HMONITOR monitor) {
     const auto size = item_.Size();
     width_ = static_cast<int>(size.Width);
     height_ = static_cast<int>(size.Height);
+    rawWidth_ = width_;
+    rawHeight_ = height_;
+    hasCrop_ = false;
+    cropLeft_ = 0;
+    cropTop_ = 0;
     return width_ > 0 && height_ > 0;
 }
 
@@ -155,19 +141,55 @@ bool WgcSession::createCaptureItem(HWND window) {
     auto factory = winrt::get_activation_factory<wgcap::GraphicsCaptureItem>();
     auto interop = factory.as<IGraphicsCaptureItemInterop>();
 
+    HWND targetWindow = resolveRootCaptureWindow(window);
+    if (!targetWindow) {
+        targetWindow = window;
+    }
+
     wgcap::GraphicsCaptureItem item{nullptr};
     HRESULT hr = interop->CreateForWindow(
-        window,
+        targetWindow,
         winrt::guid_of<wgcap::GraphicsCaptureItem>(),
         reinterpret_cast<void**>(winrt::put_abi(item)));
     if (!succeeded(hr, "CreateForWindow")) {
+        hr = interop->CreateForWindow(
+            window,
+            winrt::guid_of<wgcap::GraphicsCaptureItem>(),
+            reinterpret_cast<void**>(winrt::put_abi(item)));
+        if (!succeeded(hr, "CreateForWindow(original)")) {
+            return false;
+        }
+        targetWindow = window;
+    }
+
+    const auto size = item.Size();
+    if (size.Width <= 0 || size.Height <= 0) {
         return false;
     }
 
     item_ = item;
-    const auto size = item_.Size();
-    width_ = roundUpToEven(static_cast<int>(size.Width));
-    height_ = roundUpToEven(static_cast<int>(size.Height));
+    const WindowDpiProcs dpiProcs = WindowDpiProcs::load();
+    const WindowCropResult crop = queryWindowCropBounds(
+        targetWindow,
+        dpiProcs,
+        static_cast<int>(size.Width),
+        static_cast<int>(size.Height));
+    rawWidth_ = crop.rawWidth;
+    rawHeight_ = crop.rawHeight;
+    width_ = crop.width;
+    height_ = crop.height;
+    hasCrop_ = crop.hasCrop;
+    cropLeft_ = crop.cropLeft;
+    cropTop_ = crop.cropTop;
+
+    if (hasCrop_) {
+        std::cout << "{\"event\":\"window-crop\",\"schemaVersion\":2,"
+                  << "\"rawWidth\":" << rawWidth_ << ",\"rawHeight\":" << rawHeight_
+                  << ",\"cropLeft\":" << cropLeft_ << ",\"cropTop\":" << cropTop_
+                  << ",\"width\":" << width_ << ",\"height\":" << height_ << "}"
+                  << std::endl;
+    }
+
     return width_ > 0 && height_ > 0;
 }
 
@@ -251,7 +273,7 @@ bool WgcSession::initialize(HMONITOR monitor, int fps, bool captureCursor) {
         winrtDevice_,
         wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
         kFramePoolBuffers,
-        winrt::Windows::Graphics::SizeInt32{width_, height_});
+        winrt::Windows::Graphics::SizeInt32{rawWidth_, rawHeight_});
     session_ = framePool_.CreateCaptureSession(item_);
 
     if (!applySessionOptions(captureCursor)) {
@@ -275,7 +297,7 @@ bool WgcSession::initialize(HWND window, int fps, bool captureCursor, bool inclu
         winrtDevice_,
         wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
         kFramePoolBuffers,
-        winrt::Windows::Graphics::SizeInt32{width_, height_});
+        winrt::Windows::Graphics::SizeInt32{rawWidth_, rawHeight_});
     session_ = framePool_.CreateCaptureSession(item_);
 
     if (!applySessionOptions(captureCursor)) {
