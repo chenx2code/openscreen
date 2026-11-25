@@ -1,0 +1,50 @@
+name: Build Windows Native Helper
+
+on:
+  push:
+    branches:
+      - "fix/wgc-crop-window-shadow-borders-longterm"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build WGC Helper & Installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js & Dependencies
+        uses: ./.github/actions/setup
+
+      - name: Build Native Windows Helpers
+        run: npm run build:native:win
+
+      - name: Upload Native Binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-wgc-helpers
+          path: |
+            electron/native/bin/win32-x64/wgc-capture.exe
+            electron/native/bin/win32-x64/cursor-sampler.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Stage whisper-stt binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/stage-whisper-stt.sh win32-x64 || true
+
+      - name: Build Windows Installer
+        continue-on-error: true
+        run: npm run build:win -- --publish never
+
+      - name: Upload Windows Installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: |
+            release/**/Openscreen.Setup.*.exe
+          if-no-files-found: warn
+          retention-days: 14
